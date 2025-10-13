@@ -11,6 +11,17 @@
 (define-constant MAX-TEMP 8)
 (define-constant SHIPMENT-DURATION u1440)
 
+(define-constant ERR-NOT-INSURED (err u409))
+(define-constant ERR-ALREADY-INSURED (err u410))
+(define-constant ERR-INVALID-PREMIUM (err u411))
+
+(define-constant BASIC-PREMIUM-RATE u10)
+(define-constant PREMIUM-PREMIUM-RATE u20)
+(define-constant BASIC-COVERAGE-PERCENT u30)
+(define-constant PREMIUM-COVERAGE-PERCENT u60)
+
+(define-data-var insurance-pool-balance uint u0)
+
 (define-data-var next-shipment-id uint u1)
 (define-data-var oracle-fee uint u1000)
 
@@ -207,4 +218,87 @@
 
 (define-read-only (get-next-shipment-id)
     (var-get next-shipment-id)
+)
+
+(define-map shipment-insurance uint {
+    is-insured: bool,
+    premium-paid: uint,
+    coverage-tier: (string-ascii 10),
+    max-refund: uint
+})
+
+(define-private (calculate-insurance-premium (payment uint) (tier (string-ascii 10)))
+    (if (is-eq tier "basic")
+        (/ (* payment BASIC-PREMIUM-RATE) u100)
+        (if (is-eq tier "premium")
+            (/ (* payment PREMIUM-PREMIUM-RATE) u100)
+            u0
+        )
+    )
+)
+
+(define-private (calculate-coverage-amount (payment uint) (tier (string-ascii 10)))
+    (if (is-eq tier "basic")
+        (/ (* payment BASIC-COVERAGE-PERCENT) u100)
+        (if (is-eq tier "premium")
+            (/ (* payment PREMIUM-COVERAGE-PERCENT) u100)
+            u0
+        )
+    )
+)
+
+(define-public (purchase-insurance (shipment-id uint) (tier (string-ascii 10)))
+    (let (
+        (shipment (unwrap! (map-get? shipments shipment-id) ERR-SHIPMENT-NOT-FOUND))
+        (existing-insurance (map-get? shipment-insurance shipment-id))
+        (premium (calculate-insurance-premium (get payment-amount shipment) tier))
+        (coverage (calculate-coverage-amount (get payment-amount shipment) tier))
+    )
+        (asserts! (is-eq tx-sender (get shipper shipment)) ERR-UNAUTHORIZED)
+        (asserts! (is-none existing-insurance) ERR-ALREADY-INSURED)
+        (asserts! (> premium u0) ERR-INVALID-PREMIUM)
+        (asserts! (or (is-eq tier "basic") (is-eq tier "premium")) ERR-INVALID-PREMIUM)
+        
+        (try! (stx-transfer? premium tx-sender (as-contract tx-sender)))
+        
+        (var-set insurance-pool-balance (+ (var-get insurance-pool-balance) premium))
+        
+        (map-set shipment-insurance shipment-id {
+            is-insured: true,
+            premium-paid: premium,
+            coverage-tier: tier,
+            max-refund: coverage
+        })
+        
+        (ok coverage)
+    )
+)
+
+(define-public (claim-insurance (shipment-id uint))
+    (let (
+        (shipment (unwrap! (map-get? shipments shipment-id) ERR-SHIPMENT-NOT-FOUND))
+        (insurance (unwrap! (map-get? shipment-insurance shipment-id) ERR-NOT-INSURED))
+        (violations (get temperature-violations shipment))
+        (pool-balance (var-get insurance-pool-balance))
+        (refund-amount (get max-refund insurance))
+    )
+        (asserts! (is-eq tx-sender (get shipper shipment)) ERR-UNAUTHORIZED)
+        (asserts! (get is-completed shipment) ERR-SHIPMENT-NOT-FOUND)
+        (asserts! (> violations u6) ERR-UNAUTHORIZED)
+        (asserts! (>= pool-balance refund-amount) ERR-INSUFFICIENT-PAYMENT)
+        
+        (try! (as-contract (stx-transfer? refund-amount tx-sender (get shipper shipment))))
+        
+        (var-set insurance-pool-balance (- pool-balance refund-amount))
+        
+        (ok refund-amount)
+    )
+)
+
+(define-read-only (get-insurance-details (shipment-id uint))
+    (map-get? shipment-insurance shipment-id)
+)
+
+(define-read-only (get-pool-balance)
+    (ok (var-get insurance-pool-balance))
 )
