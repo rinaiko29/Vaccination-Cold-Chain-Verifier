@@ -302,3 +302,84 @@
 (define-read-only (get-pool-balance)
     (ok (var-get insurance-pool-balance))
 )
+
+
+(define-map shipment-quality uint {
+    quality-score: uint,
+    compliance-rate: uint,
+    total-readings: uint
+})
+
+(define-map shipper-reputation principal {
+    total-shipments: uint,
+    completed-shipments: uint,
+    average-score: uint,
+    total-violations: uint
+})
+
+(define-private (calculate-quality-score (violations uint) (total-readings uint))
+    (let (
+        (base-score u100)
+        (violation-penalty (* violations u8))
+        (reading-bonus (if (>= total-readings u20) u5 u0))
+        (raw-score (if (> violation-penalty base-score) 
+            u0 
+            (- base-score violation-penalty)))
+    )
+        (if (> (+ raw-score reading-bonus) u100)
+            u100
+            (+ raw-score reading-bonus))
+    )
+)
+
+(define-private (calculate-compliance-rate (violations uint) (total-readings uint))
+    (if (is-eq total-readings u0)
+        u100
+        (/ (* (- total-readings violations) u100) total-readings)
+    )
+)
+
+(define-private (update-shipper-reputation (shipper principal) (quality-score uint) (violations uint))
+    (let (
+        (current-rep (default-to 
+            {total-shipments: u0, completed-shipments: u0, average-score: u0, total-violations: u0}
+            (map-get? shipper-reputation shipper)))
+        (new-total (+ (get completed-shipments current-rep) u1))
+        (new-avg (/ (+ (* (get average-score current-rep) (get completed-shipments current-rep)) quality-score) new-total))
+    )
+        (map-set shipper-reputation shipper {
+            total-shipments: (+ (get total-shipments current-rep) u1),
+            completed-shipments: new-total,
+            average-score: new-avg,
+            total-violations: (+ (get total-violations current-rep) violations)
+        })
+    )
+)
+
+(define-public (finalize-shipment-quality (shipment-id uint))
+    (let (
+        (shipment (unwrap! (map-get? shipments shipment-id) ERR-SHIPMENT-NOT-FOUND))
+        (logs (default-to (list) (map-get? temperature-logs shipment-id)))
+        (total-readings (len logs))
+        (violations (get temperature-violations shipment))
+        (quality (calculate-quality-score violations total-readings))
+        (compliance (calculate-compliance-rate violations total-readings))
+    )
+        (asserts! (get is-completed shipment) ERR-UNAUTHORIZED)
+        (map-set shipment-quality shipment-id {
+            quality-score: quality,
+            compliance-rate: compliance,
+            total-readings: total-readings
+        })
+        (update-shipper-reputation (get shipper shipment) quality violations)
+        (ok quality)
+    )
+)
+
+(define-read-only (get-shipment-quality (shipment-id uint))
+    (map-get? shipment-quality shipment-id)
+)
+
+(define-read-only (get-shipper-reputation (shipper principal))
+    (map-get? shipper-reputation shipper)
+)
